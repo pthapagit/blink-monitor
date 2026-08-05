@@ -186,7 +186,7 @@ Worst case (slow home internet):        ~60s
 Stage 2: Face recognition
   → Add AWS Rekognition (requires S3 archive — add bucket then)
   → Match against known faces collection
-  → Include "Prabesh (97%)" in Telegram caption
+  → Include "Alex (97%)" in Telegram caption
 
 Stage 3: Scene description
   → Extract frames with FFmpeg Lambda layer

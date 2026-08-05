@@ -50,9 +50,11 @@ class BlinkClient:
         """Initialise the client.
 
         Args:
-            login_blob: The blinkpy login dict from Secrets Manager. Must
-                contain username/password and, after bootstrap, token +
-                refresh_token + hardware_id. Loaded via secrets_loader only.
+            login_blob: The blinkpy OAuth login dict from Secrets Manager.
+                Must contain token, refresh_token, and hardware_id. Must NOT
+                contain a Blink password — password is bootstrap-only and is
+                stripped before any Secrets Manager write. Loaded via
+                secrets_loader only.
         """
         self._login = login_blob
         self._initial_token: str | None = login_blob.get("token")

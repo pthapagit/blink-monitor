@@ -1,0 +1,44 @@
+# Supply-chain and security gates for blink-monitor.
+# Deploy path must use hash-locked installs; never unhashed requirements.txt alone.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  poller-security:
+    name: Poller tests + hash-locked audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lambda/poller
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime (hash-verified) + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements.lock
+          pip install -r requirements-dev.txt
+
+      - name: pip-audit (strict)
+        run: pip-audit --strict -r requirements.lock
+
+      - name: Unit tests
+        run: pytest tests/ -v
+
+      - name: Prove hash-locked package build
+        run: |
+          rm -rf /tmp/blink-package
+          pip install --require-hashes -r requirements.lock -t /tmp/blink-package
+          test -d /tmp/blink-package/blinkpy
+          test -d /tmp/blink-package/aiohttp

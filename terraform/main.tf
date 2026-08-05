@@ -25,8 +25,8 @@ resource "aws_lambda_function" "poller" {
   filename         = var.poller_zip_path
   source_code_hash = filebase64sha256(var.poller_zip_path)
 
-  # Optional — see var.reserved_concurrent_executions. Omitted on new accounts
-  # where the 10-execution account limit cannot spare a reservation.
+  # Default 1 — see var.reserved_concurrent_executions. Set null only on
+  # brand-new accounts that cannot spare a reserved execution.
   reserved_concurrent_executions = var.reserved_concurrent_executions
 
   depends_on = [aws_cloudwatch_log_group.poller]

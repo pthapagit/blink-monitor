@@ -42,15 +42,15 @@ variable "log_retention_days" {
 
 variable "reserved_concurrent_executions" {
   description = <<-EOT
-    Reserved concurrency for the poller Lambda. Set to 1 on accounts with a
-    normal concurrent limit (1000+) to prevent duplicate Telegram messages.
+    Reserved concurrency for the poller Lambda. Default is 1 to prevent
+    duplicate Telegram messages and SSM races (required by SECURITY.md).
 
-    Leave null on brand-new AWS accounts: they often have only 10 total
-    concurrent executions, and AWS requires 10 to stay unreserved — so
-    reserving 1 fails with InvalidParameterValueException.
-    After requesting a limit increase, set this to 1 and re-apply.
+    Brand-new AWS accounts often have only 10 total concurrent executions,
+    and AWS requires 10 to stay unreserved — reserving 1 then fails with
+    InvalidParameterValueException. On those accounts set this to null
+    until you request a concurrency limit increase, then re-apply with 1.
   EOT
   type        = number
-  default     = null
+  default     = 1
   nullable    = true
 }

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
 
 from blink_client import BlinkAPIError, BlinkAuthError, BlinkClient
+from log_redact import configure_secure_logging
 from secrets_loader import load_secrets
 from state_store import StateStore
 from telegram_client import (
@@ -19,6 +20,8 @@ from telegram_client import (
     TelegramPermanentError,
     TelegramTransientError,
 )
+
+configure_secure_logging()
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -192,12 +195,17 @@ def _find_new_clips(clips: list[Any], last_seen_clip_id: str) -> list[Any]:
 
     clip_ids = [str(clip.id) for clip in clips]
     if last_seen_clip_id not in clip_ids:
-        # Last-seen clip rotated off the SD card. Safe default: most recent only.
+        # Last-seen clip rotated off the SD card. Prefer delivering every clip
+        # still on the card (oldest → newest, capped by the caller) over
+        # silently dropping intermediate motion events. Duplicates are possible
+        # if SSM was behind; missed alerts are worse for a camera monitor.
         logger.warning(
-            "last_seen_clip_id=%s not in manifest — defaulting to most recent",
+            "last_seen_clip_id=%s not in manifest — treating all %d "
+            "manifest clip(s) as new (oldest first)",
             last_seen_clip_id,
+            len(clips),
         )
-        return [clips[-1]]
+        return list(clips)
 
     last_index = clip_ids.index(last_seen_clip_id)
     return clips[last_index + 1:]

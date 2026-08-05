@@ -69,6 +69,10 @@ Or provision secret shells via `terraform apply` then populate values.
 - Telegram: rotate via @BotFather if compromised, update secret immediately
 - Review secrets every 90 days minimum
 
+**Persist path:** `persist_blink_login` strips `password` (and related fields) before
+every Secrets Manager write — same guarantee as bootstrap. Never put a Blink
+password into the secret manually.
+
 ### What NEVER goes in:
 - `.env` files
 - Lambda environment variables (visible in AWS console to anyone with Lambda read access)
@@ -221,7 +225,8 @@ pip install --require-hashes -r requirements.lock -t ./package/
 ### If Telegram token is compromised:
 1. Revoke token immediately via @BotFather → `/revoke`
 2. Generate new token, update secret in Secrets Manager
-3. Lambda picks up new token on next cold start (or wait for cache expiry)
+3. Lambda reloads on next cold start, or immediately after a Telegram **401**
+   (warm cache is invalidated on 401)
 
 ### If AWS credentials are compromised:
 1. Deactivate the IAM key immediately
@@ -242,5 +247,7 @@ pip install --require-hashes -r requirements.lock -t ./package/
 - [ ] Lambda deployed with `pip install --require-hashes -r requirements.lock`
 - [ ] `.gitignore` includes `*.json`, `.env`, `credentials*`
 - [ ] CloudWatch log retention set to 30 days
-- [ ] Reserved concurrency = 1 on the poller Lambda
+- [ ] Reserved concurrency = 1 on the poller Lambda (Terraform default)
+- [ ] CI green: hash-locked install + `pip-audit --strict` + unit tests
 - [ ] No `print()` statements that could leak secrets
+- [ ] Confirm `persist_blink_login` strips password (covered by unit tests)

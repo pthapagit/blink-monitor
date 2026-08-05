@@ -55,6 +55,38 @@ def test_persist_blink_login_writes_when_token_present():
     fake_client.put_secret_value.assert_called_once()
 
 
+def test_persist_blink_login_strips_password():
+    """Password must never be written to Secrets Manager on token refresh."""
+    fake_client = MagicMock()
+    blob = {
+        "token": "new",
+        "refresh_token": "r2",
+        "hardware_id": "hw",
+        "password": "SHOULD-NOT-BE-STORED",
+        "username": "you@email.com",
+    }
+    with patch.object(secrets_loader.boto3, "client", return_value=fake_client):
+        secrets_loader.persist_blink_login(blob)
+
+    fake_client.put_secret_value.assert_called_once()
+    written = fake_client.put_secret_value.call_args.kwargs["SecretString"]
+    import json
+
+    parsed = json.loads(written)
+    assert "password" not in parsed
+    assert parsed["token"] == "new"
+    assert parsed["refresh_token"] == "r2"
+    assert parsed["hardware_id"] == "hw"
+
+
+def test_sanitize_blink_blob_removes_password_null():
+    sanitized = secrets_loader._sanitize_blink_blob(
+        {"token": "t", "password": None, "refresh_token": "r"}
+    )
+    assert "password" not in sanitized
+    assert sanitized["token"] == "t"
+
+
 def test_persist_blink_login_skips_when_no_token():
     fake_client = MagicMock()
     with patch.object(secrets_loader.boto3, "client", return_value=fake_client):

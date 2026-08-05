@@ -44,10 +44,11 @@ def test_last_seen_is_newest_returns_nothing():
     assert handler._find_new_clips(clips(1, 2, 3), "3") == []
 
 
-def test_last_seen_missing_defaults_to_most_recent():
-    # Last-seen clip rotated off the SD card.
+def test_last_seen_missing_returns_all_manifest_clips():
+    # Last-seen clip rotated off the SD card — deliver remaining clips so
+    # intermediate motion events are not silently dropped.
     result = handler._find_new_clips(clips(5, 6, 7), "2")
-    assert [c.id for c in result] == [7]
+    assert [c.id for c in result] == [5, 6, 7]
 
 
 # ---------------------------------------------------------------------------

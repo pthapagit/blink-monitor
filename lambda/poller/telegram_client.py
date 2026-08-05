@@ -90,6 +90,12 @@ class TelegramClient:
         if status == 200:
             return
         logger.error("Telegram %s returned status %d", endpoint, status)
+        # 401 = revoked/rotated bot token. Drop the warm secrets cache so the
+        # next poll cycle reloads from Secrets Manager.
+        if status == 401:
+            from secrets_loader import invalidate_cache
+
+            invalidate_cache()
         if 400 <= status < 500:
             raise TelegramPermanentError(f"{endpoint} rejected with {status}")
         raise TelegramTransientError(f"{endpoint} failed with {status}")

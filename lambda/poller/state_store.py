@@ -3,6 +3,8 @@
 # Prevents duplicate Telegram notifications across Lambda invocations.
 
 import logging
+import os
+
 import boto3
 from botocore.exceptions import ClientError
 
@@ -10,6 +12,11 @@ logger = logging.getLogger(__name__)
 
 LAST_SEEN_PARAM = "/blink-monitor/last-seen-clip-id"
 INITIAL_VALUE = "NONE"
+AWS_REGION = (
+    os.environ.get("AWS_REGION")
+    or os.environ.get("AWS_DEFAULT_REGION")
+    or "us-east-1"
+)
 
 
 class StateStore:
@@ -20,7 +27,7 @@ class StateStore:
     """
 
     def __init__(self) -> None:
-        self._ssm = boto3.client("ssm", region_name="us-east-1")
+        self._ssm = boto3.client("ssm", region_name=AWS_REGION)
 
     async def get_last_seen_clip_id(self) -> str:
         """Get the ID of the last clip sent to Telegram.

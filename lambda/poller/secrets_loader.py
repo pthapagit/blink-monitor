@@ -10,6 +10,7 @@
 
 import json
 import logging
+import os
 from typing import Any
 
 import boto3
@@ -18,28 +19,38 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger(__name__)
 
 # Module-level cache — reused across warm Lambda invocations.
-# Secrets are loaded once per execution-environment lifetime.
+# Secrets are loaded once per execution-environment lifetime (or until
+# invalidate_cache / TTL). Safe because secrets don't change mid-invocation.
 _secrets_cache: dict[str, Any] = {}
 
-AWS_REGION = "us-east-1"
+# Prefer Lambda-injected region; fall back for local runs.
+AWS_REGION = (
+    os.environ.get("AWS_REGION")
+    or os.environ.get("AWS_DEFAULT_REGION")
+    or "us-east-1"
+)
 
 SECRET_NAMES = {
     "blink": "/blink-monitor/blink-credentials",
     "telegram": "/blink-monitor/telegram-bot-token",
 }
 
+# Never persist these to Secrets Manager. Password is for local bootstrap only;
+# blinkpy may leave password=null or a stale value on login_attributes.
+FIELDS_TO_STRIP = ("password",)
+
 
 async def load_secrets() -> dict[str, Any]:
     """Load all required secrets from AWS Secrets Manager.
 
     Uses a module-level cache to avoid redundant API calls on warm
-    invocations. Safe because secrets don't change mid-invocation and Lambda
-    execution environments are short-lived.
+    invocations. Call ``invalidate_cache()`` after rotating secrets (or on
+    Telegram 401) so the next load picks up new values.
 
     Returns:
         Dict with keys 'blink' and 'telegram', each holding their secret dict.
-        The 'blink' value is the full blinkpy login blob (username/password
-        plus token/refresh_token/hardware_id once bootstrapped).
+        The 'blink' value is an OAuth token blob (token / refresh_token /
+        hardware_id). Password is never required and must not be stored.
 
     Raises:
         RuntimeError: If any required secret cannot be loaded or is invalid.
@@ -56,6 +67,10 @@ async def load_secrets() -> dict[str, Any]:
 
     for key, secret_name in SECRET_NAMES.items():
         loaded[key] = _fetch_secret(client, secret_name)
+
+    # Heal legacy blobs that still contain a password from older persist paths.
+    if isinstance(loaded.get("blink"), dict):
+        loaded["blink"] = _sanitize_blink_blob(loaded["blink"])
 
     _validate_secrets(loaded)
     _secrets_cache = loaded
@@ -134,12 +149,30 @@ def invalidate_cache() -> None:
     logger.info("Secrets cache invalidated")
 
 
+def _sanitize_blink_blob(login_attributes: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of the login blob with password and other stripped fields removed.
+
+    Args:
+        login_attributes: Raw blinkpy auth.login_attributes dict.
+
+    Returns:
+        Sanitized dict safe to write to Secrets Manager.
+    """
+    sanitized = dict(login_attributes)
+    for field in FIELDS_TO_STRIP:
+        sanitized.pop(field, None)
+    return sanitized
+
+
 def persist_blink_login(login_attributes: dict[str, Any]) -> None:
-    """Persist the full blinkpy login blob back to Secrets Manager.
+    """Persist the blinkpy OAuth token blob back to Secrets Manager.
 
     blinkpy refreshes its OAuth tokens transparently; this saves the updated
     blob so the new refresh token survives Lambda cold starts (otherwise every
     cold start would re-run the 2FA flow, which can't happen headless).
+
+    Password (and other FIELDS_TO_STRIP keys) are removed before write — even
+    if blinkpy left ``password: null`` or a stale value on login_attributes.
 
     IMPORTANT: Call this ONLY when the token actually changed — not on every
     poll. Writing on every cycle creates a new Secrets Manager version each
@@ -147,20 +180,22 @@ def persist_blink_login(login_attributes: dict[str, Any]) -> None:
     the pre/post token and only calls this on a real refresh.
 
     Args:
-        login_attributes: blinkpy's auth.login_attributes dict (username,
-            password, token, refresh_token, hardware_id, region_id, ...).
+        login_attributes: blinkpy's auth.login_attributes dict (token,
+            refresh_token, hardware_id, region_id, ...). Password must never
+            be stored; it is stripped here regardless.
     """
     if not login_attributes or not login_attributes.get("token"):
         logger.error("Refusing to persist Blink login — no token present")
         return
 
+    sanitized = _sanitize_blink_blob(login_attributes)
     client = boto3.client("secretsmanager", region_name=AWS_REGION)
     secret_name = SECRET_NAMES["blink"]
 
     try:
         client.put_secret_value(
             SecretId=secret_name,
-            SecretString=json.dumps(login_attributes),
+            SecretString=json.dumps(sanitized),
         )
         invalidate_cache()
         logger.info("Blink login blob refreshed in Secrets Manager")
