@@ -1,0 +1,28 @@
+# lambda/poller/requirements.in
+# Top-level (direct) runtime dependencies ONLY. Transitive deps are resolved
+# and HASH-PINNED into requirements.lock via scripts/lock_requirements.sh.
+#
+# Why this split:
+#   - requirements.in   = human intent (what we directly depend on)
+#   - requirements.lock = machine truth (every package + sub-dep, hash-locked)
+#
+# blinkpy tracks Blink's UNOFFICIAL API — an unpinned bump can break auth
+# overnight. Always read the changelog + run `pip-audit` before changing a pin.
+
+# Blink API client. 0.25.x ships native Sync Module local-storage helpers
+# (LocalStorageMediaItem.download_video / prepare_download) and OAuth2+PKCE
+# auth with transparent token refresh — we rely on both.
+blinkpy==0.25.5
+
+# Async HTTP. Pinned to 3.14.0 to clear known CVEs present in 3.9.5 / 3.13.x:
+#   GHSA-9548-qrrj-x5pj (request smuggling via chunked trailers)
+#   GHSA-54jq-c3m8-4m76 / GHSA-p998-jp59-783m (static handler path leaks)
+# blinkpy depends on aiohttp too; this pin overrides to the patched line.
+aiohttp==3.14.0
+
+# AWS SDK. Pre-installed in the Lambda runtime, pinned here for local/dev parity.
+boto3==1.43.24
+
+# NOTE: python-telegram-bot was REMOVED. telegram_client.py talks to the
+# Telegram Bot API directly over aiohttp, so the SDK was dead weight (larger
+# cold start + extra supply-chain surface for zero use).

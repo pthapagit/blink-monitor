@@ -1,0 +1,10 @@
+# lambda/poller/requirements-dev.txt
+# Local development + test + security-tooling deps. NOT bundled into the
+# Lambda deployment zip.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pip-audit==2.7.3        # CVE scan, run before every deploy
+pip-tools==7.4.1        # provides pip-compile for the hash lock

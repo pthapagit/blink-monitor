@@ -1,0 +1,71 @@
+# .gitignore for blink-monitor
+# SECURITY: These patterns prevent accidental credential commits.
+# Never remove *.json — blinkpy saves credentials as JSON files.
+
+# Python
+.venv/
+venv/
+.pip-tools-cache/
+.cache/
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Credentials and secrets — NEVER commit these
+*.json
+!**/tsconfig.json
+.env
+.env.*
+!.env.example
+blink_config*
+cred.json
+*_credentials.json
+*_secret.json
+*.token
+*.pem
+*.p12
+*.key
+id_rsa*
+id_ed25519*
+
+# Lambda build artifacts (contain installed deps + may echo local paths)
+lambda/poller/package/
+lambda/warmup/package/
+*.zip
+
+# Terraform — state and local provider cache contain account IDs / ARNs
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/terraform.tfvars
+terraform/*.auto.tfvars
+crash.log
+crash.*.log
+
+# Keep the provider lockfile (safe, no secrets) so `terraform init` is reproducible
+!terraform/.terraform.lock.hcl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Accidental brace-expansion dirs from bad shell commands
+\{docs,lambda,terraform\}/
+
+# AWS SAM (if used)
+.aws-sam/
+samconfig.toml
