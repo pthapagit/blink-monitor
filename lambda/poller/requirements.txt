@@ -16,7 +16,7 @@
 # ──────────────────────────────────────────────────────────────────────────
 
 blinkpy==0.25.5
-aiohttp==3.14.0
+aiohttp==3.14.3
 boto3==1.43.24
 
 # Transitive deps that blinkpy pulls in and that our code touches directly

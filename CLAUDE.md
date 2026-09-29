@@ -117,7 +117,7 @@ logger.debug("Full response: %s", response_with_signed_url)
 - Review blinkpy changelog before any version bump; run `pip-audit --strict` before deploy
 - Direct runtime dependencies:
   - `blinkpy` — Blink API + native local-storage helpers
-  - `aiohttp` — async HTTP (must stay on a CVE-patched pin, currently 3.14.0)
+  - `aiohttp` — async HTTP (must stay on a CVE-patched pin, currently 3.14.3)
   - `boto3` — AWS SDK (pre-installed in Lambda, still pin for local dev)
 
 ## Testing

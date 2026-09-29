@@ -192,7 +192,7 @@ if chat_id != self._allowed_chat_id:
 ### Pin all versions — deploy from hash-locked lockfile
 ```
 blinkpy==0.25.5
-aiohttp==3.14.0
+aiohttp==3.14.3
 boto3==1.43.24
 ```
 

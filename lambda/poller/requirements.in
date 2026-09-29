@@ -14,11 +14,10 @@
 # auth with transparent token refresh — we rely on both.
 blinkpy==0.25.5
 
-# Async HTTP. Pinned to 3.14.0 to clear known CVEs present in 3.9.5 / 3.13.x:
-#   GHSA-9548-qrrj-x5pj (request smuggling via chunked trailers)
-#   GHSA-54jq-c3m8-4m76 / GHSA-p998-jp59-783m (static handler path leaks)
-# blinkpy depends on aiohttp too; this pin overrides to the patched line.
-aiohttp==3.14.0
+# Async HTTP. Pinned to 3.14.3, the latest 3.14 patch that clears the
+# PYSEC-2026 advisories pip-audit reports against 3.14.0 (fixed across
+# 3.14.1–3.14.3). blinkpy depends on aiohttp too; this pin overrides it.
+aiohttp==3.14.3
 
 # AWS SDK. Pre-installed in the Lambda runtime, pinned here for local/dev parity.
 boto3==1.43.24
