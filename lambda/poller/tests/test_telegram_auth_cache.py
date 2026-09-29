@@ -4,12 +4,12 @@ from unittest.mock import patch
 
 import pytest
 
-from telegram_client import TelegramClient, TelegramPermanentError
+from telegram_client import TelegramAuthError, TelegramClient, TelegramPermanentError
 
 
 def test_raise_for_status_401_invalidates_secrets_cache():
     with patch("secrets_loader.invalidate_cache") as invalidate:
-        with pytest.raises(TelegramPermanentError):
+        with pytest.raises(TelegramAuthError):
             TelegramClient._raise_for_status(401, "sendVideo")
     invalidate.assert_called_once()
 

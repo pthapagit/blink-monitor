@@ -1,5 +1,4 @@
-"""Tests for state_store.py: SSM-backed last-seen clip tracking, including the
-'first run' (ParameterNotFound) path and the don't-store-empty guard."""
+"""Tests for the SSM delivery log: legacy ids, JSON round-trip, and the cap."""
 
 from unittest.mock import MagicMock, patch
 
@@ -7,7 +6,13 @@ import pytest
 from botocore.exceptions import ClientError
 
 import state_store
-from state_store import INITIAL_VALUE, StateStore
+from state_store import (
+    MAX_SEEN_CLIPS,
+    DeliveryState,
+    StateStore,
+    parse_parameter_value,
+    serialize_state,
+)
 
 
 def _client_error(code):
@@ -19,18 +24,47 @@ def _store_with_client(mock_client):
         return StateStore()
 
 
-async def test_get_returns_stored_value():
-    client = MagicMock()
-    client.get_parameter.return_value = {"Parameter": {"Value": "clip-42"}}
-    store = _store_with_client(client)
-    assert await store.get_last_seen_clip_id() == "clip-42"
+def test_none_is_first_run():
+    state = parse_parameter_value("NONE")
+    assert state.first_run is True
+    assert state.seen == []
+
+
+def test_plain_clip_id_is_a_legacy_cursor():
+    state = parse_parameter_value("1796171000")
+    assert state.legacy_cursor == "1796171000"
+    assert state.first_run is False
+
+
+def test_json_round_trip_keeps_seen_and_failures():
+    original = DeliveryState(seen=["7:100", "8:200"], failures={"9:300": 2})
+    restored = parse_parameter_value(serialize_state(original))
+    assert restored.seen == ["7:100", "8:200"]
+    assert restored.failures == {"9:300": 2}
+    assert restored.legacy_cursor is None
+    assert restored.first_run is False
+
+
+def test_remember_drops_oldest_past_the_cap():
+    state = DeliveryState()
+    for index in range(MAX_SEEN_CLIPS + 5):
+        state.remember(f"{index}:{index}")
+    assert len(state.seen) == MAX_SEEN_CLIPS
+    assert "0:0" not in state.seen_set()
+    assert f"{MAX_SEEN_CLIPS + 4}:{MAX_SEEN_CLIPS + 4}" in state.seen_set()
+
+
+def test_corrupt_json_does_not_replay():
+    state = parse_parameter_value("{not-json")
+    assert state.first_run is True
 
 
 async def test_get_missing_param_is_first_run():
     client = MagicMock()
     client.get_parameter.side_effect = _client_error("ParameterNotFound")
     store = _store_with_client(client)
-    assert await store.get_last_seen_clip_id() == INITIAL_VALUE
+    state = await store.get_delivery_state()
+    assert state.first_run is True
 
 
 async def test_get_other_error_raises():
@@ -38,19 +72,13 @@ async def test_get_other_error_raises():
     client.get_parameter.side_effect = _client_error("AccessDenied")
     store = _store_with_client(client)
     with pytest.raises(ClientError):
-        await store.get_last_seen_clip_id()
+        await store.get_delivery_state()
 
 
-async def test_set_writes_parameter():
+async def test_save_writes_json_not_a_bare_id():
     client = MagicMock()
     store = _store_with_client(client)
-    await store.set_last_seen_clip_id("clip-7")
-    client.put_parameter.assert_called_once()
-    assert client.put_parameter.call_args.kwargs["Value"] == "clip-7"
-
-
-async def test_set_empty_is_skipped():
-    client = MagicMock()
-    store = _store_with_client(client)
-    await store.set_last_seen_clip_id("")
-    client.put_parameter.assert_not_called()
+    await store.save_delivery_state(DeliveryState(seen=["7:100"]))
+    written = client.put_parameter.call_args.kwargs["Value"]
+    assert written.startswith("{")
+    assert "7:100" in written

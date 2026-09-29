@@ -58,6 +58,37 @@ full SD history). Use a specific recent clip ID to resume from a point in time.
 
 ---
 
+### Issue: Old clips flooding Telegram
+
+**Symptom:** Telegram receives a stream of old SD-card videos, oldest first,
+until it catches up to the latest.
+
+**Cause:** Blink clip IDs are random. When the saved cursor disappeared from
+the card (full card, format, reboot), older builds treated other IDs as new
+and replayed the card.
+
+**Fix (immediate):**
+```bash
+# Stop the schedule while you reset state
+aws events disable-rule --region us-east-1 --name blink-monitor-poll
+
+# Jump to "first run" behaviour — next poll sends ONLY the newest clip
+aws ssm put-parameter \
+  --region us-east-1 \
+  --name /blink-monitor/last-seen-clip-id \
+  --value "NONE" \
+  --overwrite
+
+aws events enable-rule --region us-east-1 --name blink-monitor-poll
+```
+
+Current code remembers recently sent clips as `id:recording_time` and only
+sends clips from the last 2 hours that are not in that log. A formatted card
+that reuses an id is still delivered, because the recording time differs.
+Setting the parameter back to `NONE` sends only the single newest clip.
+
+---
+
 ### Issue: BlinkAuthError / 2FA required
 
 The stored OAuth refresh token is invalid or revoked.

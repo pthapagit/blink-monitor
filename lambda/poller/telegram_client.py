@@ -29,7 +29,15 @@ class TelegramPermanentError(Exception):
 class TelegramTransientError(Exception):
     """A failure that MAY succeed on retry (network error, HTTP 5xx).
 
-    The caller should leave state untouched so the clip is retried next cycle.
+    The caller should leave the clip unremembered so it is retried next cycle.
+    """
+
+
+class TelegramAuthError(TelegramTransientError):
+    """Telegram rejected the bot token (HTTP 401).
+
+    The clip must be retried after the secret is reloaded. It must not be
+    marked seen, and it must not count toward the give-up limit.
     """
 
 
@@ -96,6 +104,7 @@ class TelegramClient:
             from secrets_loader import invalidate_cache
 
             invalidate_cache()
+            raise TelegramAuthError(f"{endpoint} rejected with 401")
         if 400 <= status < 500:
             raise TelegramPermanentError(f"{endpoint} rejected with {status}")
         raise TelegramTransientError(f"{endpoint} failed with {status}")

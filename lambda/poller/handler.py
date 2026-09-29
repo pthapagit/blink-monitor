@@ -4,7 +4,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -14,8 +14,9 @@ DISPLAY_TIMEZONE = ZoneInfo("America/New_York")
 from blink_client import BlinkAPIError, BlinkAuthError, BlinkClient
 from log_redact import configure_secure_logging
 from secrets_loader import load_secrets
-from state_store import StateStore
+from state_store import DeliveryState, StateStore
 from telegram_client import (
+    TelegramAuthError,
     TelegramClient,
     TelegramPermanentError,
     TelegramTransientError,
@@ -32,7 +33,13 @@ logger.setLevel(logging.INFO)
 # silently dropped.
 MAX_CLIPS_PER_CYCLE = 5
 
-INITIAL_STATE = "NONE"
+# Blink clip IDs are random, not chronological. Replaying "every higher id"
+# dumps the SD card. Only deliver footage recorded inside this window, and
+# only if that exact id+timestamp has not already been handled.
+MAX_CLIP_AGE = timedelta(hours=2)
+
+# A clip that cannot be read from the card must not block newer motion forever.
+MAX_DELIVERY_ATTEMPTS = 3
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -62,13 +69,27 @@ async def _run_poll_cycle() -> dict[str, Any]:
     telegram_client = TelegramClient(secrets["telegram"])
 
     try:
-        last_seen_clip_id = await state_store.get_last_seen_clip_id()
-        logger.info("Last seen clip ID: %s", last_seen_clip_id)
+        delivery_state = await state_store.get_delivery_state()
+        logger.info(
+            "Delivery log: remembered=%d first_run=%s legacy=%s",
+            len(delivery_state.seen),
+            delivery_state.first_run,
+            delivery_state.legacy_cursor is not None,
+        )
 
         await blink_client.authenticate()
 
         clips = await blink_client.get_sorted_clips()  # oldest -> newest
-        new_clips = _find_new_clips(clips, last_seen_clip_id)
+        needs_persist = (
+            delivery_state.first_run or delivery_state.legacy_cursor is not None
+        )
+        new_clips = select_clips_to_send(
+            clips, delivery_state, datetime.now(timezone.utc)
+        )
+        if needs_persist:
+            # Retire NONE / the old single-id cursor before sending, so a
+            # crash cannot fall back into a full-card replay.
+            await state_store.save_delivery_state(delivery_state)
 
         if not new_clips:
             logger.info("No new clips found — nothing to send")
@@ -84,7 +105,7 @@ async def _run_poll_cycle() -> dict[str, Any]:
         sent_count = 0
         for clip in batch:
             delivered = await _process_clip(
-                clip, blink_client, telegram_client, state_store
+                clip, blink_client, telegram_client, delivery_state, state_store
             )
             if not delivered:
                 # Transient failure — stop the batch and DO NOT advance past
@@ -112,53 +133,80 @@ async def _process_clip(
     clip: Any,
     blink_client: BlinkClient,
     telegram_client: TelegramClient,
+    delivery_state: DeliveryState,
     state_store: StateStore,
 ) -> bool:
     """Download one clip and deliver it (or a text fallback) to Telegram.
 
-    State is advanced past the clip on success OR on a permanent failure (so a
-    single un-sendable clip can't wedge the queue forever). It is NOT advanced
-    on a transient failure, so the clip is retried next cycle.
+    A clip is remembered on success, on a permanent Telegram rejection, or
+    after repeated read failures. A revoked bot token (401) is not remembered,
+    so the clip is retried once the secret is fixed. Other transient failures
+    retry, then give up after ``MAX_DELIVERY_ATTEMPTS``.
 
     Args:
         clip: A LocalStorageMediaItem (.id, .name, .created_at).
         blink_client: Authenticated Blink client.
         telegram_client: Telegram sender.
-        state_store: SSM-backed state.
+        delivery_state: In-memory delivery log for this cycle.
+        state_store: Persists the log after each handled clip.
 
     Returns:
-        True if the clip was handled (delivered or permanently skipped with a
-        text alert); False on a transient failure that should halt the batch.
+        True if the clip was handled (delivered or given up with a text
+        alert); False on a retryable failure that should halt the batch.
     """
-    clip_id = str(clip.id)
+    clip_key = clip_identity(clip)
+    clip_id = getattr(clip, "id", None)
     caption = _build_caption(clip)
+    if clip_key is None:
+        logger.error("clip_id=%s has no usable timestamp — skipping", clip_id)
+        return True
 
     try:
         video_bytes = await blink_client.download_clip(clip)
         await telegram_client.send_clip(video=video_bytes, caption=caption)
-        await state_store.set_last_seen_clip_id(clip_id)
+        await _remember(delivery_state, state_store, clip_key)
         logger.info("Delivered clip_id=%s", clip_id)
         return True
 
-    except TelegramPermanentError as e:
-        # Clip is fundamentally un-sendable (too large / rejected). Send a text
-        # alert so the event isn't silent, then advance so newer clips flow.
-        logger.error(
-            "Permanent send failure for clip_id=%s (%s) — sending text fallback",
-            clip_id,
-            type(e).__name__,
-        )
-        await _send_fallback(telegram_client, caption)
-        await state_store.set_last_seen_clip_id(clip_id)
-        return True
-
-    except (BlinkAPIError, TelegramTransientError) as e:
-        # Transient (network/5xx/Blink upload not ready) — leave state untouched
-        # so the clip retries next cycle.
+    except TelegramAuthError:
+        # Token revoked or rotated. Cache is already cleared; do not mark the
+        # clip seen and do not count this toward the give-up limit.
         logger.warning(
-            "Transient failure for clip_id=%s: %s", clip_id, type(e).__name__
+            "Telegram rejected the bot token for clip_id=%s — will retry", clip_id
         )
         return False
+
+    except TelegramPermanentError:
+        logger.error(
+            "Permanent send failure for clip_id=%s — sending text fallback", clip_id
+        )
+        await _send_fallback(telegram_client, caption)
+        await _remember(delivery_state, state_store, clip_key)
+        return True
+
+    except (BlinkAPIError, TelegramTransientError):
+        attempts = delivery_state.note_failure(clip_key)
+        logger.warning(
+            "Transient failure for clip_id=%s (attempt %d/%d)",
+            clip_id,
+            attempts,
+            MAX_DELIVERY_ATTEMPTS,
+        )
+        if attempts >= MAX_DELIVERY_ATTEMPTS:
+            logger.error("Giving up on clip_id=%s after repeated failures", clip_id)
+            await _send_fallback(telegram_client, caption)
+            await _remember(delivery_state, state_store, clip_key)
+            return True
+        await state_store.save_delivery_state(delivery_state)
+        return False
+
+
+async def _remember(
+    delivery_state: DeliveryState, state_store: StateStore, clip_key: str
+) -> None:
+    """Mark a clip handled and persist the log."""
+    delivery_state.remember(clip_key)
+    await state_store.save_delivery_state(delivery_state)
 
 
 async def _send_fallback(telegram_client: TelegramClient, caption: str) -> None:
@@ -173,42 +221,133 @@ async def _send_fallback(telegram_client: TelegramClient, caption: str) -> None:
         logger.error("Text fallback also failed — advancing anyway")
 
 
-def _find_new_clips(clips: list[Any], last_seen_clip_id: str) -> list[Any]:
-    """Return clips newer than last_seen, oldest first.
+def select_clips_to_send(
+    clips: list[Any], state: DeliveryState, now: datetime
+) -> list[Any]:
+    """Choose clips that still need delivery.
+
+    Blink assigns random clip IDs, so "new" means "this id and recording time
+    have not been handled" and the recording is inside ``MAX_CLIP_AGE``.
+    A legacy single-id cursor is converted in place: if that clip is still on
+    the card, only later recordings are eligible; if the card no longer has
+    it (format, full card), the current card is marked seen and nothing is
+    replayed.
 
     Args:
-        clips: LocalStorageMediaItem list, oldest -> newest.
-        last_seen_clip_id: ID of the last clip successfully delivered, or
-            "NONE" on first run.
+        clips: Manifest clips. Order is not trusted; results are oldest first.
+        state: Delivery log. Mutated when a legacy cursor is retired.
+        now: Current UTC time, injected so tests are deterministic.
 
     Returns:
-        Sublist of clips that still need to be sent, oldest first.
+        Clips to send, oldest first. First run (``NONE``) returns only the
+        newest clip.
     """
-    if not clips:
+    usable = [clip for clip in clips if clip_identity(clip) is not None]
+    usable.sort(key=lambda clip: _aware(clip.created_at))
+    if not usable:
         return []
 
-    if last_seen_clip_id == INITIAL_STATE:
-        # First run: send only the single most recent clip, never the whole
-        # SD-card backlog.
+    if state.first_run:
+        # Remember everything already on the card except the newest clip,
+        # which is the only one we deliver. Otherwise the next poll would
+        # treat the rest of the 2-hour window as unseen.
         logger.info("First run — sending most recent clip only")
-        return [clips[-1]]
+        for clip in usable[:-1]:
+            identity = clip_identity(clip)
+            if identity is not None:
+                state.remember(identity)
+        state.first_run = False
+        return [usable[-1]]
 
-    clip_ids = [str(clip.id) for clip in clips]
-    if last_seen_clip_id not in clip_ids:
-        # Last-seen clip rotated off the SD card. Prefer delivering every clip
-        # still on the card (oldest → newest, capped by the caller) over
-        # silently dropping intermediate motion events. Duplicates are possible
-        # if SSM was behind; missed alerts are worse for a camera monitor.
+    if state.legacy_cursor is not None:
+        seeded, pending = _migrate_legacy_cursor(usable, state.legacy_cursor, now)
+        for clip_key in seeded:
+            state.remember(clip_key)
+        logger.info(
+            "Retired legacy cursor %s — remembered %d clip(s), %d pending",
+            state.legacy_cursor,
+            len(seeded),
+            len(pending),
+        )
+        state.legacy_cursor = None
+        return pending
+
+    cutoff = now - MAX_CLIP_AGE
+    seen = state.seen_set()
+    pending: list[Any] = []
+    for clip in usable:
+        created_at = _aware(clip.created_at)
+        if clip_identity(clip) in seen or created_at < cutoff:
+            continue
+        pending.append(clip)
+    return pending
+
+
+def _migrate_legacy_cursor(
+    clips: list[Any], cursor: str, now: datetime
+) -> tuple[list[str], list[Any]]:
+    """Convert a plain last-seen id into remembered keys plus clips to send.
+
+    Args:
+        clips: Usable manifest clips, any order.
+        cursor: Clip id stored by an older build.
+        now: Current UTC time.
+
+    Returns:
+        ``(keys_to_remember, clips_to_send)``. When the cursor clip is gone,
+        every clip currently on the card is remembered and nothing is sent.
+    """
+    match = next((clip for clip in clips if str(clip.id) == str(cursor)), None)
+    if match is None:
         logger.warning(
-            "last_seen_clip_id=%s not in manifest — treating all %d "
-            "manifest clip(s) as new (oldest first)",
-            last_seen_clip_id,
+            "Legacy cursor %s is not on the card — marking %d clip(s) seen "
+            "without resending",
+            cursor,
             len(clips),
         )
-        return list(clips)
+        return [clip_identity(clip) for clip in clips if clip_identity(clip)], []
 
-    last_index = clip_ids.index(last_seen_clip_id)
-    return clips[last_index + 1:]
+    cursor_time = _aware(match.created_at)
+    cutoff = now - MAX_CLIP_AGE
+    seeded: list[str] = []
+    pending: list[Any] = []
+    for clip in sorted(clips, key=lambda item: _aware(item.created_at)):
+        created_at = _aware(clip.created_at)
+        identity = clip_identity(clip)
+        if identity is None:
+            continue
+        if created_at <= cursor_time:
+            seeded.append(identity)
+        elif created_at >= cutoff:
+            pending.append(clip)
+    return seeded, pending
+
+
+def clip_identity(clip: Any) -> str | None:
+    """Build the remembered key for a clip: ``id:unix_timestamp``.
+
+    Args:
+        clip: Object with ``.id`` and ``.created_at``.
+
+    Returns:
+        Key string, or None when the clip has no usable timestamp. The same
+        id recorded again at a different time (for example after a card
+        format) produces a different key.
+    """
+    created_at = getattr(clip, "created_at", None)
+    if not isinstance(created_at, datetime):
+        return None
+    clip_id = getattr(clip, "id", None)
+    if clip_id is None:
+        return None
+    return f"{clip_id}:{int(_aware(created_at).timestamp())}"
+
+
+def _aware(created_at: datetime) -> datetime:
+    """Treat a naive timestamp as UTC."""
+    if created_at.tzinfo is None:
+        return created_at.replace(tzinfo=timezone.utc)
+    return created_at
 
 
 def _build_caption(clip: Any) -> str:
